@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ryujin-lcd"
+version = "0.1.0"
+description = "Cross-platform ASUS ROG Ryujin II LCD dashboard"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "python-multipart>=0.0.20,<1",
+  "pillow>=11,<13",
+  "psutil>=7,<8",
+]
+
+[project.optional-dependencies]
+linux = ["pyusb>=1.3,<2", "hidapi>=0.14.0.post4,<1"]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1"]
+
+[project.scripts]
+ryujin-lcd = "ryujin_lcd.cli:main"
+
+[tool.setuptools]
+packages = ["ryujin_lcd"]
+
+[tool.setuptools.package-data]
+ryujin_lcd = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

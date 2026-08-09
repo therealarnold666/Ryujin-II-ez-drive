@@ -1,0 +1,16 @@
+# Python environments, bytecode, and test state
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local build outputs
+build/
+dist/
+*.egg-info/
+*.obj
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,3 @@
+# Ryujin II 0b05:1988: grant the active desktop user access to USB and HID.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0b05", ATTR{idProduct}=="1988", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1988", MODE="0660", GROUP="plugdev", TAG+="uaccess"
