@@ -305,14 +305,12 @@ class LinuxExperimentalDriver(LCDDriver):
 
     def _drain_frame_ack(self) -> None:
         if self.frame_ack_pending:
-            # Firmware normally emits EE 20 after a bulk frame, but some
-            # Linux HID stacks do not surface that optional acknowledgement.
-            # It is only synchronization, not evidence that the frame failed
-            # (the bulk transfer itself already completed successfully).
-            try:
-                self._hid_read(250)
-            except DriverError:
-                pass
+            # Firmware normally emits EE 20 after a bulk frame, but the
+            # Linux hidapi backend can block indefinitely while waiting for
+            # that optional acknowledgement after resume/boot.  The bulk
+            # transfer is the authoritative delivery result, so do not read
+            # the acknowledgement here: it is neither required by the device
+            # nor safe to put on the periodic rendering path.
             self.frame_ack_pending = False
 
     def _ensure_display_mode(self) -> None:
