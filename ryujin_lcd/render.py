@@ -12,6 +12,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from .sensors import Metrics, short_cpu_name, short_gpu_name
 
 
+STAT_MODULES = {
+    "temperature": ("TEMP", "temp_c", " °C", 0, "white"),
+    "load": ("LOAD", "usage", " %", 0, "#7ce8ff"),
+    "clock": ("CLOCK", "freq_mhz", " GHz", 1, "#ffc56e"),
+    "voltage": ("VOLT", "voltage_v", " V", 2, "#c7a7ff"),
+    "power": ("POWER", "power_w", " W", 0, "#8ff0a4"),
+}
+
+
 class _AnimatedBackground:
     def __init__(self, path: Path) -> None:
         # BytesIO prevents an open GIF from locking the upload destination on Windows.
@@ -128,7 +137,8 @@ def _metric(value: float | int | None, unit: str, digits: int = 0) -> str:
 
 
 def render(metrics: Metrics, background: str, width: int = 320, height: int = 240,
-           animation_time: float | None = None) -> Image.Image:
+           animation_time: float | None = None, cpu_modules: list[str] | None = None,
+           gpu_modules: list[str] | None = None) -> Image.Image:
     source = _background(background)
     if source:
         with _background_lock:
@@ -145,7 +155,6 @@ def render(metrics: Metrics, background: str, width: int = 320, height: int = 24
     number = _font(16, True)
     small = _font(9)
     tiny = _font(9, True)
-    columns = (46, 122, 198, 274)
 
     def text(position: tuple[int, int], value: str, font: ImageFont.ImageFont, fill: str) -> None:
         draw.text(position, value, font=font, fill=fill, stroke_width=1, stroke_fill="#02050a")
@@ -158,26 +167,28 @@ def render(metrics: Metrics, background: str, width: int = 320, height: int = 24
         x = int(right - draw.textlength(value, font=font))
         text((x, y), value, font, fill)
 
-    def sensor_row(top: int, temp: float | None, load: float | None,
-                   freq: float | None, voltage: float | None) -> None:
-        labels = ("TEMP", "LOAD", "CLOCK", "VOLT")
-        ghz = freq / 1000 if freq else None
-        values = (
-            _metric(temp, " °C", 0), _metric(load, " %", 0), _metric(ghz, " GHz", 1),
-            _metric(voltage, " V", 2),
-        )
-        colors = ("white", "#7ce8ff", "#ffc56e", "#c7a7ff")
-        for x, label, value, color in zip(columns, labels, values, colors):
+    def sensor_row(top: int, prefix: str, modules: list[str]) -> None:
+        active = [module for module in modules if module in STAT_MODULES]
+        if not active:
+            return
+        # Each module owns one evenly-spaced position; ordering in settings is
+        # therefore both display order and LCD placement.
+        columns = [int((index + 0.5) * width / len(active)) for index in range(len(active))]
+        for x, module in zip(columns, active):
+            label, field, unit, digits, color = STAT_MODULES[module]
+            value = getattr(metrics, f"{prefix}_{field}")
+            if module == "clock" and value is not None:
+                value = value / 1000
             centered(x, top, label, small, "#9aa8bd")
-            centered(x, top + 13, value, number, color)
+            centered(x, top + 13, _metric(value, unit, digits), number, color)
 
     # Divide the 240 px display into three balanced 80 px bands:
     # CPU, GPU, then the two compact capacity bars.
     text((16, 8), short_cpu_name(metrics.cpu_name), title, "#7ce8ff")
-    sensor_row(37, metrics.cpu_temp_c, metrics.cpu_usage, metrics.cpu_freq_mhz, metrics.cpu_voltage_v)
+    sensor_row(37, "cpu", cpu_modules or list(STAT_MODULES))
 
     text((16, 88), short_gpu_name(metrics.gpu_name), title, "#7ce8ff")
-    sensor_row(117, metrics.gpu_temp_c, metrics.gpu_usage, metrics.gpu_freq_mhz, metrics.gpu_voltage_v)
+    sensor_row(117, "gpu", gpu_modules or list(STAT_MODULES))
 
     def capacity_bar(y: int, label: str, used_mb: float | None, total_mb: float | None, color: str) -> None:
         used = used_mb or 0.0

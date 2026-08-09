@@ -4,8 +4,20 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+
+STAT_MODULE_IDS = ("temperature", "load", "clock", "voltage", "power")
+DEFAULT_STAT_MODULES = list(STAT_MODULE_IDS)
+
+
+def normalize_modules(value: object) -> list[str]:
+    """Keep a unique, ordered list; its index is the LCD module position."""
+    if not isinstance(value, list):
+        return list(DEFAULT_STAT_MODULES)
+    result = [item for item in value if isinstance(item, str) and item in STAT_MODULE_IDS]
+    return list(dict.fromkeys(result))
 
 
 def app_dir() -> Path:
@@ -55,6 +67,8 @@ class Settings:
     direct_helper_path: str = ""
     sdk_path: str = r"C:\Program Files (x86)\FinalWire\AIDA64 Extreme\ROGAIOSDK.dll"
     helper_path: str = ""
+    cpu_modules: list[str] = field(default_factory=lambda: list(DEFAULT_STAT_MODULES))
+    gpu_modules: list[str] = field(default_factory=lambda: list(DEFAULT_STAT_MODULES))
 
     @classmethod
     def load(cls) -> "Settings":
@@ -65,6 +79,8 @@ class Settings:
         values = json.loads(path.read_text(encoding="utf-8"))
         allowed = cls.__dataclass_fields__.keys()
         settings = cls(**{k: v for k, v in values.items() if k in allowed})
+        settings.cpu_modules = normalize_modules(settings.cpu_modules)
+        settings.gpu_modules = normalize_modules(settings.gpu_modules)
         if (not settings.background or not Path(settings.background).is_file()) and default_background:
             settings.background = str(default_background)
         return settings

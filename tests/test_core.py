@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from ryujin_lcd.config import Settings, bundled_background
+from ryujin_lcd.config import Settings, bundled_background, normalize_modules
 from ryujin_lcd.conflicts import armoury_ryujin_modules_present
 from ryujin_lcd.drivers import MockDriver
 from ryujin_lcd.render import background_is_animated, frame_bytes, render
@@ -41,6 +41,12 @@ def test_settings_defaults():
     assert settings.pixel_order in {"RGB", "BGR"}
     assert settings.windows_backend == "direct"
     assert 1 <= settings.animation_fps <= 30
+    assert settings.cpu_modules == ["temperature", "load", "clock", "voltage", "power"]
+    assert settings.gpu_modules == ["temperature", "load", "clock", "voltage", "power"]
+
+
+def test_stat_module_normalization_preserves_positions():
+    assert normalize_modules(["power", "temperature", "power", "unknown"]) == ["power", "temperature"]
 
 
 def test_bundled_visual_assets():

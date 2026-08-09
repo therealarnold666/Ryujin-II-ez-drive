@@ -19,6 +19,7 @@ _pdh_query = None
 _pdh_counter = None
 _pdh_primed = False
 _pdh_lock = threading.Lock()
+_cpu_energy_sample: tuple[float, float] | None = None
 
 
 @dataclass
@@ -28,11 +29,13 @@ class Metrics:
     cpu_freq_mhz: float | None = None
     cpu_temp_c: float | None = None
     cpu_voltage_v: float | None = None
+    cpu_power_w: float | None = None
     gpu_name: str | None = None
     gpu_usage: float | None = None
     gpu_freq_mhz: float | None = None
     gpu_temp_c: float | None = None
     gpu_voltage_v: float | None = None
+    gpu_power_w: float | None = None
     gpu_memory_used_mb: float | None = None
     gpu_memory_total_mb: float | None = None
     coolant_temp_c: float | None = None
@@ -77,7 +80,7 @@ def _nvidia() -> dict:
     exe = shutil.which("nvidia-smi")
     if not exe:
         return {}
-    fields = "name,temperature.gpu,utilization.gpu,clocks.current.graphics,memory.used,memory.total"
+    fields = "name,temperature.gpu,utilization.gpu,clocks.current.graphics,memory.used,memory.total,power.draw"
     try:
         output = subprocess.run(
             [exe, f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
@@ -86,8 +89,8 @@ def _nvidia() -> dict:
             check=False,
             timeout=3,
         ).stdout.splitlines()[0]
-        name, temp, usage, clock, used, total = [x.strip() for x in output.split(",")]
-        return {
+        name, temp, usage, clock, used, total, power = [x.strip() for x in output.split(",")]
+        result = {
             "gpu_name": name,
             "gpu_temp_c": float(temp),
             "gpu_usage": float(usage),
@@ -95,8 +98,44 @@ def _nvidia() -> dict:
             "gpu_memory_used_mb": float(used),
             "gpu_memory_total_mb": float(total),
         }
+        try:
+            result["gpu_power_w"] = float(power)
+        except ValueError:
+            pass
+        return result
     except (IndexError, OSError, ValueError, subprocess.TimeoutExpired):
         return {}
+
+
+def _linux_cpu_power() -> float | None:
+    """Read package power where the kernel exposes it, without extra daemons."""
+    global _cpu_energy_sample
+    if sys.platform != "linux":
+        return None
+    for node in Path("/sys/class/hwmon").glob("hwmon*"):
+        try:
+            name = (node / "name").read_text().strip().lower()
+            if name not in {"k10temp", "zenpower", "coretemp", "amd_energy"}:
+                continue
+            for candidate in ("power1_average", "power1_input"):
+                path = node / candidate
+                if path.exists():
+                    return int(path.read_text()) / 1_000_000
+        except (OSError, ValueError):
+            pass
+    for path in Path("/sys/class/powercap").glob("**/energy_uj"):
+        try:
+            now, energy = time.monotonic(), int(path.read_text())
+            if _cpu_energy_sample is not None:
+                previous_time, previous_energy = _cpu_energy_sample
+                elapsed = now - previous_time
+                if elapsed > 0 and energy >= previous_energy:
+                    _cpu_energy_sample = (now, energy)
+                    return (energy - previous_energy) / 1_000_000 / elapsed
+            _cpu_energy_sample = (now, energy)
+        except (OSError, ValueError):
+            pass
+    return None
 
 
 def _windows_realtime_cpu_freq(base_mhz: float | None) -> float | None:
@@ -339,6 +378,7 @@ def collect() -> Metrics:
         cpu_usage=psutil.cpu_percent(interval=None),
         cpu_freq_mhz=cpu_freq_mhz,
         cpu_temp_c=cpu_temp,
+        cpu_power_w=_linux_cpu_power(),
         coolant_temp_c=coolant,
         pump_rpm=pump,
         internal_fan_rpm=internal,

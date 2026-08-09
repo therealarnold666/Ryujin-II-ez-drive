@@ -33,7 +33,10 @@ class Engine:
     def _tick(self, send: bool = True, update_metrics: bool = True) -> None:
         if update_metrics:
             self.metrics = collect()
-        image = render(self.metrics, self.settings.background, self.settings.width, self.settings.height)
+        image = render(
+            self.metrics, self.settings.background, self.settings.width, self.settings.height,
+            cpu_modules=self.settings.cpu_modules, gpu_modules=self.settings.gpu_modules,
+        )
         output = io.BytesIO()
         image.save(output, "PNG")
         self.preview = output.getvalue()
