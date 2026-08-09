@@ -20,6 +20,7 @@ _pdh_counter = None
 _pdh_primed = False
 _pdh_lock = threading.Lock()
 _cpu_energy_sample: tuple[float, float] | None = None
+_cpu_name_cache: str | None = None
 
 
 @dataclass
@@ -74,6 +75,23 @@ def _temperatures() -> tuple[float | None, float | None, int | None, int | None]
             except (OSError, ValueError):
                 pass
     return cpu_temp, coolant, pump, internal
+
+
+def _cpu_name() -> str | None:
+    """Return the operating system's CPU model name, cached across samples."""
+    global _cpu_name_cache
+    if _cpu_name_cache is not None:
+        return _cpu_name_cache
+    if sys.platform == "linux":
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                key, separator, value = line.partition(":")
+                if separator and key.strip().lower() == "model name" and value.strip():
+                    _cpu_name_cache = value.strip()
+                    return _cpu_name_cache
+        except OSError:
+            pass
+    return None
 
 
 def _nvidia() -> dict:
@@ -375,6 +393,7 @@ def collect() -> Metrics:
     memory = psutil.virtual_memory()
     cpu_temp, coolant, pump, internal = _temperatures()
     metrics = Metrics(
+        cpu_name=_cpu_name(),
         cpu_usage=psutil.cpu_percent(interval=None),
         cpu_freq_mhz=cpu_freq_mhz,
         cpu_temp_c=cpu_temp,
