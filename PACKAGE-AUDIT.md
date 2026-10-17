@@ -2,6 +2,8 @@
 
 Audit date: 2026-08-09
 
+Aligned with GitHub commit `ab04367fa685cda24acb36f06463a9205191fad8` and retains the locally verified Windows PDH clock, provider pipeline and enlarged layout.
+
 ## Included current state
 
 - Current static background: `ryujin_lcd/assets/background.png`
@@ -10,6 +12,8 @@ Audit date: 2026-08-09
   - SHA-256: `2C5C3CCCA9A8992C37D89C936E82CB0435F6088F4AAC9EA2C0617CDCA2EE6CC1`
 - Current 320x240 three-band layout, enlarged CPU/GPU labels and values, symmetric four-column spacing, `°C`, GHz, V, VRAM/RAM absolute bars: `ryujin_lcd/render.py`
 - Windows Ryzen boost clock via native PDH processor-performance counter: `ryujin_lcd/sensors.py`
+- Modular cross-platform sensor provider pipeline: `ryujin_lcd/sensor_providers.py`
+- CPU/GPU power fields and five-column TEMP/LOAD/CLOCK/VOLT/POWER display: `ryujin_lcd/sensors.py`, `native/sensor_helper.cs`, `ryujin_lcd/render.py`
 - Animated GIF decoding/cache and 24 FPS scheduling: `ryujin_lcd/render.py`, `ryujin_lcd/engine.py`
 - Windows direct HID + WinUSB backend and mode recovery:
   - Source: `native/ryujin_direct_helper.cpp`
@@ -20,7 +24,12 @@ Audit date: 2026-08-09
 - Armoury Crate/AIDA64 conflict handling: `ryujin_lcd/conflicts.py`, `scripts/check-conflicts.ps1`
 - Ubuntu conflict handling and access rules: `scripts/check-conflicts.sh`, `scripts/99-ryujin-lcd.rules`
 - Ubuntu parity diagnostic: `scripts/check-ubuntu-parity.sh`
+- Ubuntu systemd service used by the aligned upstream version: `scripts/ryujin-lcd.service`
 - Reproducible Windows executable recipe: `RyujinLCD.spec`
+- The Windows executable uses the GUI subsystem (`console=False`) so scheduled logon startup is silent and has no lifetime-owning command prompt.
+- Periodic Windows subprocesses use `CREATE_NO_WINDOW`/`SW_HIDE`; LibreHardwareMonitor helper and PowerShell WMI polling are fallback-only when native Registry/PDH/NVIDIA sources cannot provide required fields.
+- Armoury Crate coexistence is based on the real HID+WinUSB open/write result, not generic ASUS process names or the presence of AIOFan HAL. Transient helper/USB failures are retried every three seconds and reported through the `reconnects` status counter.
+- The LCD header includes a right-aligned host system clock in 24-hour `HH:MM` format using the bundled ROG font.
 - Login startup entry point with conflict-safe automatic LCD start: `--auto-start --no-browser`
 - Reproducible Windows logon task installer: `scripts/install-autostart.ps1`
 

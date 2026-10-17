@@ -68,12 +68,17 @@ def aida_lcd_output_disabled() -> bool:
 
 def process_conflicts() -> list[Conflict]:
     names = WINDOWS_CONTROLLERS if os.name == "nt" else LINUX_CONTROLLERS
-    ryujin_armoury_active = armoury_ryujin_modules_present()
     found: list[Conflict] = []
     for proc in psutil.process_iter(["pid", "name"]):
         try:
             name = (proc.info["name"] or "").lower()
-            if os.name == "nt" and name in WINDOWS_ARMOURY_CONTROLLERS and not ryujin_armoury_active:
+            # Armoury Crate itself can coexist with the direct HID+WinUSB
+            # backend. Aac_AIOFan is also used for fan telemetry/control and
+            # its installed DLL is not proof that the LCD USB interface is
+            # owned. The direct driver's actual open/write result is the
+            # authoritative exclusivity check. Never kill the general Armoury
+            # UI/service merely because an ASUS module exists on disk.
+            if os.name == "nt" and name in WINDOWS_ARMOURY_CONTROLLERS:
                 continue
             if os.name == "nt" and name == "aida64.exe" and aida_lcd_output_disabled():
                 continue
@@ -97,6 +102,7 @@ def stop_process_conflicts() -> dict:
                 text=True,
                 check=False,
                 timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             # 1062 means the service was already stopped.
             if result.returncode not in (0, 1062) and "1062" not in (result.stdout + result.stderr):
@@ -152,7 +158,7 @@ def diagnostic() -> dict:
         "armoury_ryujin_modules_present": armoury_ryujin_modules_present(),
         "process_conflicts": [asdict(x) for x in process_conflicts()],
         "linux_open_handles": linux_open_handles(),
-        "note": "检测结果是保守名单；启动 LCD 前应只保留一个控制端。",
+        "note": "Windows 允许 Armoury Crate 共存；LCD 独占以 HID+WinUSB 实际打开/写入结果为准。",
     }
 
 
@@ -163,10 +169,9 @@ class InstanceLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Linux flock locks the open file descriptor, not its contents.  Open
+        # Linux flock locks the open file descriptor, not its contents. Open
         # an existing lock read-only so an application launched with sudo can
-        # share a lock file created by the desktop user (notably on root-squash
-        # or similarly restricted temporary filesystems).
+        # share a lock file created by the desktop user.
         if os.name == "nt":
             self._file = self.path.open("a+b")
         else:

@@ -5,6 +5,8 @@ import io
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -138,7 +140,8 @@ def _metric(value: float | int | None, unit: str, digits: int = 0) -> str:
 
 def render(metrics: Metrics, background: str, width: int = 320, height: int = 240,
            animation_time: float | None = None, cpu_modules: list[str] | None = None,
-           gpu_modules: list[str] | None = None) -> Image.Image:
+           gpu_modules: list[str] | None = None, clock_text: str | None = None) -> Image.Image:
+    dual_gpu = len(metrics.gpus) > 1
     source = _background(background)
     if source:
         with _background_lock:
@@ -152,7 +155,8 @@ def render(metrics: Metrics, background: str, width: int = 320, height: int = 24
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     title = _font(15, True)
-    number = _font(16, True)
+    number = _font(15, True)
+    compact_number = _font(14, True)
     small = _font(9)
     tiny = _font(9, True)
 
@@ -167,24 +171,57 @@ def render(metrics: Metrics, background: str, width: int = 320, height: int = 24
         x = int(right - draw.textlength(value, font=font))
         text((x, y), value, font, fill)
 
-    def sensor_row(top: int, prefix: str, modules: list[str]) -> None:
+    def sensor_row(top: int, prefix: str, modules: list[str], sample: Metrics | None = None) -> None:
+        sample = sample if sample is not None else metrics
         active = [module for module in modules if module in STAT_MODULES]
         if not active:
             return
-        # Each module owns one evenly-spaced position; ordering in settings is
-        # therefore both display order and LCD placement.
         columns = [int((index + 0.5) * width / len(active)) for index in range(len(active))]
         for x, module in zip(columns, active):
             label, field, unit, digits, color = STAT_MODULES[module]
-            value = getattr(metrics, f"{prefix}_{field}")
+            value = getattr(sample, f"{prefix}_{field}")
             if module == "clock" and value is not None:
                 value = value / 1000
             centered(x, top, label, small, "#9aa8bd")
-            centered(x, top + 13, _metric(value, unit, digits), number, color)
+            value_font = compact_number if module in {"clock", "voltage"} else number
+            centered(x, top + 13, _metric(value, unit, digits), value_font, color)
+
+    if dual_gpu:
+        # Three equal sensor bands leave 70 px for independent capacity bars.
+        title = _font(13, True)
+        number = _font(13, True)
+        compact_number = _font(12, True)
+        small = _font(8)
+        text((16, 4), short_cpu_name(metrics.cpu_name), title, "#7ce8ff")
+        right_aligned(304, 4, clock_text or datetime.now().strftime("%H:%M"), title, "#eaf3ff")
+        sensor_row(23, "cpu", cpu_modules or list(STAT_MODULES))
+        colors = ("#8ff0a4", "#8ff0a4")
+        for position, gpu in enumerate(metrics.gpus[:2]):
+            top = 57 + position * 53
+            sample = replace(metrics, **{k: v for k, v in gpu.items() if k.startswith("gpu_")})
+            text((16, top), f"GPU {gpu['index'] + 1}  {short_gpu_name(sample.gpu_name)}", title, colors[position])
+            sensor_row(top + 19, "gpu", gpu_modules or list(STAT_MODULES), sample)
+
+        def compact_bar(y, label, used_mb, total_mb, color):
+            font = _font(8, True)
+            text((16, y), label, font, "#c6d0df")
+            value = "-- / --" if not total_mb else f"{(used_mb or 0) / 1024:.1f}/{total_mb / 1024:.1f} GB"
+            right_aligned(304, y, value, font, "#eaf3ff")
+            left, right = 74, 194
+            draw.rounded_rectangle((left, y + 2, right, y + 9), 3, fill=(5, 10, 18, 205), outline="#617087")
+            ratio = min(1.0, max(0.0, (used_mb or 0) / total_mb)) if total_mb else 0
+            if ratio:
+                draw.rounded_rectangle((left, y + 2, left + max(1, int((right-left)*ratio)), y + 9), 3, fill=color)
+
+        for position, gpu in enumerate(metrics.gpus[:2]):
+            compact_bar(173 + position * 22, f"VRAM {gpu['index'] + 1}", gpu.get("gpu_memory_used_mb"), gpu.get("gpu_memory_total_mb"), colors[position])
+        compact_bar(217, "RAM", metrics.memory_used_mb, metrics.memory_total_mb, "#c7a7ff")
+        return Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
 
     # Divide the 240 px display into three balanced 80 px bands:
     # CPU, GPU, then the two compact capacity bars.
     text((16, 8), short_cpu_name(metrics.cpu_name), title, "#7ce8ff")
+    right_aligned(304, 8, clock_text or datetime.now().strftime("%H:%M"), title, "#eaf3ff")
     sensor_row(37, "cpu", cpu_modules or list(STAT_MODULES))
 
     text((16, 88), short_gpu_name(metrics.gpu_name), title, "#7ce8ff")

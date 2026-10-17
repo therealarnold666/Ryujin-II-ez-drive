@@ -12,6 +12,8 @@ from pathlib import Path
 
 import psutil
 
+from .sensor_providers import SensorProvider, apply_providers
+
 _lhm_cache: tuple[float, dict] = (0.0, {})
 _helper_cache: tuple[float, dict] = (0.0, {})
 _aida_started = False
@@ -19,8 +21,21 @@ _pdh_query = None
 _pdh_counter = None
 _pdh_primed = False
 _pdh_lock = threading.Lock()
-_cpu_energy_sample: tuple[float, float] | None = None
+_rapl_cache: dict[str, tuple[float, int]] = {}
 _cpu_name_cache: str | None = None
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    """Prevent periodic Windows telemetry commands from flashing a console."""
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": startupinfo,
+    }
 
 
 @dataclass
@@ -46,6 +61,37 @@ class Metrics:
     memory_used_mb: float | None = None
     memory_total_mb: float | None = None
     sources: dict[str, str] = field(default_factory=dict)
+    gpus: list[dict] = field(default_factory=list)
+
+
+def _cpu_name() -> str | None:
+    """Return the OS CPU model name, including Linux where platform may be blank."""
+    global _cpu_name_cache
+    if _cpu_name_cache is not None:
+        return _cpu_name_cache
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                value = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+                if value:
+                    _cpu_name_cache = value
+                    return _cpu_name_cache
+        except (FileNotFoundError, OSError):
+            pass
+    if sys.platform == "linux":
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                key, separator, value = line.partition(":")
+                if separator and key.strip().lower() == "model name" and value.strip():
+                    _cpu_name_cache = value.strip()
+                    return _cpu_name_cache
+        except OSError:
+            pass
+    return None
 
 
 def _temperatures() -> tuple[float | None, float | None, int | None, int | None]:
@@ -65,8 +111,7 @@ def _temperatures() -> tuple[float | None, float | None, int | None, int | None]
     if os.name != "nt":
         for node in Path("/sys/class/hwmon").glob("hwmon*"):
             try:
-                # The kernel module is named asus_rog_ryujin, while the
-                # registered hwmon device is named rog_ryujin.
+                # Module name: asus_rog_ryujin; registered hwmon name: rog_ryujin.
                 if (node / "name").read_text().strip() not in {"rog_ryujin", "asus_rog_ryujin"}:
                     continue
                 coolant = int((node / "temp1_input").read_text()) / 1000
@@ -77,28 +122,11 @@ def _temperatures() -> tuple[float | None, float | None, int | None, int | None]
     return cpu_temp, coolant, pump, internal
 
 
-def _cpu_name() -> str | None:
-    """Return the operating system's CPU model name, cached across samples."""
-    global _cpu_name_cache
-    if _cpu_name_cache is not None:
-        return _cpu_name_cache
-    if sys.platform == "linux":
-        try:
-            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
-                key, separator, value = line.partition(":")
-                if separator and key.strip().lower() == "model name" and value.strip():
-                    _cpu_name_cache = value.strip()
-                    return _cpu_name_cache
-        except OSError:
-            pass
-    return None
-
-
 def _nvidia() -> dict:
     exe = shutil.which("nvidia-smi")
     if not exe:
         return {}
-    fields = "name,temperature.gpu,utilization.gpu,clocks.current.graphics,memory.used,memory.total,power.draw"
+    fields = "index,uuid,name,temperature.gpu,utilization.gpu,clocks.current.graphics,memory.used,memory.total,power.draw"
     try:
         output = subprocess.run(
             [exe, f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
@@ -106,54 +134,31 @@ def _nvidia() -> dict:
             text=True,
             check=False,
             timeout=3,
-        ).stdout.splitlines()[0]
-        name, temp, usage, clock, used, total, power = [x.strip() for x in output.split(",")]
-        result = {
-            "gpu_name": name,
-            "gpu_temp_c": float(temp),
-            "gpu_usage": float(usage),
-            "gpu_freq_mhz": float(clock),
-            "gpu_memory_used_mb": float(used),
-            "gpu_memory_total_mb": float(total),
-        }
-        try:
-            result["gpu_power_w"] = float(power)
-        except ValueError:
-            pass
-        return result
+            **_hidden_subprocess_kwargs(),
+        ).stdout.splitlines()
+        gpus = []
+        def number(value):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        for line in output:
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) != 9:
+                continue
+            index, uuid, name, temp, usage, clock, used, total, power = parts
+            gpus.append({
+                "index": int(index), "uuid": uuid, "gpu_name": name,
+                "gpu_temp_c": number(temp), "gpu_usage": number(usage),
+                "gpu_freq_mhz": number(clock), "gpu_memory_used_mb": number(used),
+                "gpu_memory_total_mb": number(total), "gpu_power_w": number(power),
+                "gpu_voltage_v": None,
+            })
+        if not gpus:
+            return {}
+        return {**{k: v for k, v in gpus[0].items() if k.startswith("gpu_")}, "gpus": gpus}
     except (IndexError, OSError, ValueError, subprocess.TimeoutExpired):
         return {}
-
-
-def _linux_cpu_power() -> float | None:
-    """Read package power where the kernel exposes it, without extra daemons."""
-    global _cpu_energy_sample
-    if sys.platform != "linux":
-        return None
-    for node in Path("/sys/class/hwmon").glob("hwmon*"):
-        try:
-            name = (node / "name").read_text().strip().lower()
-            if name not in {"k10temp", "zenpower", "coretemp", "amd_energy"}:
-                continue
-            for candidate in ("power1_average", "power1_input"):
-                path = node / candidate
-                if path.exists():
-                    return int(path.read_text()) / 1_000_000
-        except (OSError, ValueError):
-            pass
-    for path in Path("/sys/class/powercap").glob("**/energy_uj"):
-        try:
-            now, energy = time.monotonic(), int(path.read_text())
-            if _cpu_energy_sample is not None:
-                previous_time, previous_energy = _cpu_energy_sample
-                elapsed = now - previous_time
-                if elapsed > 0 and energy >= previous_energy:
-                    _cpu_energy_sample = (now, energy)
-                    return (energy - previous_energy) / 1_000_000 / elapsed
-            _cpu_energy_sample = (now, energy)
-        except (OSError, ValueError):
-            pass
-    return None
 
 
 def _windows_realtime_cpu_freq(base_mhz: float | None) -> float | None:
@@ -255,6 +260,7 @@ def _windows_lhm() -> dict:
             text=True,
             check=False,
             timeout=4,
+            **_hidden_subprocess_kwargs(),
         ).stdout.strip()
         rows = json.loads(raw) if raw else []
         if isinstance(rows, dict):
@@ -264,6 +270,8 @@ def _windows_lhm() -> dict:
         gpu_temps: list[float] = []
         gpu_loads: list[float] = []
         gpu_clocks: list[float] = []
+        cpu_powers: list[float] = []
+        gpu_powers: list[float] = []
         for row in rows:
             ident = str(row.get("Identifier") or row.get("Parent") or "").lower()
             kind = str(row.get("SensorType") or "").lower()
@@ -271,6 +279,8 @@ def _windows_lhm() -> dict:
             value = float(row["Value"])
             if "cpu" in ident and kind == "temperature" and ("package" in name or "core" in name or "tdie" in name):
                 cpu_temps.append(value)
+            if "cpu" in ident and kind == "power" and ("package" in name or "cpu" in name):
+                cpu_powers.append(value)
             if "gpu" in ident:
                 if kind == "temperature" and ("core" in name or "gpu" in name):
                     gpu_temps.append(value)
@@ -278,6 +288,8 @@ def _windows_lhm() -> dict:
                     gpu_loads.append(value)
                 elif kind == "clock" and ("core" in name or "graphics" in name):
                     gpu_clocks.append(value)
+                elif kind == "power" and ("gpu" in name or "package" in name or "total" in name):
+                    gpu_powers.append(value)
         if cpu_temps:
             result["cpu_temp_c"] = max(cpu_temps)
         if gpu_temps:
@@ -286,6 +298,10 @@ def _windows_lhm() -> dict:
             result["gpu_usage"] = max(gpu_loads)
         if gpu_clocks:
             result["gpu_freq_mhz"] = max(gpu_clocks)
+        if cpu_powers:
+            result["cpu_power_w"] = max(cpu_powers)
+        if gpu_powers:
+            result["gpu_power_w"] = max(gpu_powers)
         _lhm_cache = (now, result)
         return result
     except (OSError, TypeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
@@ -318,6 +334,7 @@ def _sensor_helper() -> dict:
         run = subprocess.run(
             [str(helper)], cwd=str(helper.parent), capture_output=True,
             text=True, check=False, timeout=8,
+            **_hidden_subprocess_kwargs(),
         )
         raw = json.loads(run.stdout.strip()) if run.returncode == 0 and run.stdout.strip() else {}
         result = {key: value for key, value in raw.items() if value is not None}
@@ -381,48 +398,100 @@ def _aida_registry() -> dict:
             result = {
                 "cpu_temp_c": value("TCPUPKG", "TCPUDIO", "TCPU", "TCPUTCTL"),
                 "cpu_voltage_v": value("VCPU", "VCPUVID"),
+                "cpu_power_w": value("PCPUPKG"),
+                "gpu_temp_c": value("TGPU1"),
+                "gpu_voltage_v": value("VGPU1"),
+                "gpu_power_w": value("PGPU1"),
             }
             return {key: item for key, item in result.items() if item is not None}
     except (FileNotFoundError, OSError):
         return {}
 
 
-def collect() -> Metrics:
+def _linux_cpu_power() -> float | None:
+    """Read package power from powercap energy deltas, then hwmon power."""
+    if os.name == "nt":
+        return None
+    now = time.monotonic()
+    for energy_path in Path("/sys/class/powercap").glob("**/energy_uj"):
+        try:
+            energy = int(energy_path.read_text().strip())
+            key = str(energy_path)
+            previous = _rapl_cache.get(key)
+            _rapl_cache[key] = (now, energy)
+            if previous and now > previous[0]:
+                delta = energy - previous[1]
+                if delta < 0:
+                    maximum = int((energy_path.parent / "max_energy_range_uj").read_text().strip())
+                    delta += maximum
+                watts = delta / 1_000_000 / (now - previous[0])
+                if 0 < watts < 1000:
+                    return watts
+        except (OSError, ValueError):
+            continue
+    for node in Path("/sys/class/hwmon").glob("hwmon*/power*_input"):
+        try:
+            watts = int(node.read_text().strip()) / 1_000_000
+            if 0 < watts < 1000:
+                return watts
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _system_metrics() -> dict:
     freq = psutil.cpu_freq()
     cpu_freq_mhz = _windows_realtime_cpu_freq(freq.current if freq else None)
     memory = psutil.virtual_memory()
     cpu_temp, coolant, pump, internal = _temperatures()
-    metrics = Metrics(
-        cpu_name=_cpu_name(),
-        cpu_usage=psutil.cpu_percent(interval=None),
-        cpu_freq_mhz=cpu_freq_mhz,
-        cpu_temp_c=cpu_temp,
-        cpu_power_w=_linux_cpu_power(),
-        coolant_temp_c=coolant,
-        pump_rpm=pump,
-        internal_fan_rpm=internal,
-        memory_usage=memory.percent,
-        memory_used_mb=(memory.total - memory.available) / (1024 * 1024),
-        memory_total_mb=memory.total / (1024 * 1024),
-        sources={
-            "cpu_usage/memory": "psutil",
-            "cpu_frequency": "Windows PDH nominal clock × % Processor Performance; psutil on Linux",
-            "gpu": "nvidia-smi (when NVIDIA driver is installed)",
-            "linux_cpu_temperature": "psutil/lm-sensors hwmon",
-            "ryujin_coolant/pump/fan": "Linux asus_rog_ryujin hwmon",
-            "windows_cpu/gpu_temperature/voltage": "bundled LibreHardwareMonitor 0.9.6 helper",
-            "windows_cpu_fallback": "AIDA64 registry sensor export; ROG AIO LCD output must remain disabled",
-        },
-    )
-    for key, value in _sensor_helper().items():
-        setattr(metrics, key, value)
-    for key, value in _aida_registry().items():
-        setattr(metrics, key, value)
-    for key, value in _windows_lhm().items():
-        if value is not None:
-            setattr(metrics, key, value)
-    for key, value in _nvidia().items():
-        setattr(metrics, key, value)
+    return {
+        "cpu_name": _cpu_name(),
+        "cpu_usage": psutil.cpu_percent(interval=None),
+        "cpu_freq_mhz": cpu_freq_mhz,
+        "cpu_temp_c": cpu_temp,
+        "cpu_power_w": _linux_cpu_power(),
+        "coolant_temp_c": coolant,
+        "pump_rpm": pump,
+        "internal_fan_rpm": internal,
+        "memory_usage": memory.percent,
+        "memory_used_mb": (memory.total - memory.available) / (1024 * 1024),
+        "memory_total_mb": memory.total / (1024 * 1024),
+    }
+
+
+def collect() -> Metrics:
+    metrics = Metrics()
+    primary_providers = [
+        SensorProvider("system", "psutil, PDH and Linux hwmon/powercap", _system_metrics),
+        SensorProvider("aida64", "read-only AIDA64 Registry fallback", _aida_registry, os.name == "nt"),
+        SensorProvider("nvidia", "nvidia-smi telemetry including power.draw", _nvidia),
+    ]
+    metrics.sources.update(apply_providers(metrics, primary_providers))
+    multi_gpu = len(metrics.gpus) > 1
+    if multi_gpu:
+        # Unmatched registry/helper GPU numbers are not stable PCI identities.
+        for key, value in metrics.gpus[0].items():
+            if key.startswith("gpu_"):
+                setattr(metrics, key, value)
+
+    # LibreHardwareMonitor's console helper and PowerShell WMI query are kept
+    # as compatibility fallbacks only. Re-running either on every refresh can
+    # create short-lived conhost windows on Windows even when the parent was
+    # launched hidden. AIDA Registry + PDH + NVIDIA cover this installation
+    # without spawning those periodic fallback processes.
+    if os.name == "nt" and any(
+        getattr(metrics, field) is None
+        for field in ("cpu_temp_c", "cpu_voltage_v", "cpu_power_w")
+    ):
+        fallbacks = [
+            SensorProvider("windows-helper", "bundled LibreHardwareMonitor helper fallback", _sensor_helper),
+            SensorProvider("windows-lhm", "LibreHardwareMonitor WMI fallback", _windows_lhm),
+        ]
+        metrics.sources.update(apply_providers(metrics, fallbacks))
+        if multi_gpu:
+            for key, value in metrics.gpus[0].items():
+                if key.startswith("gpu_"):
+                    setattr(metrics, key, value)
     return metrics
 
 

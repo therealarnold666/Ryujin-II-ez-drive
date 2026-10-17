@@ -1,5 +1,7 @@
 # Ryujin II LCD
 
+多显卡：一次采集全部 NVIDIA GPU，以 UUID 区分设备。网页同时显示各卡数据；双卡 LCD 同屏显示 CPU、GPU 1、GPU 2，底部独立显示 VRAM 1、VRAM 2 与 RAM 进度条，不轮换。多卡电压在无法确认传感器 UUID 对应关系时显示 `--`，避免跨卡混用。Windows/Linux 使用相同逻辑。
+
 面向 ASUS ROG Ryujin II 360（USB `0b05:1988`、320×240、24-bit）的跨平台本地仪表盘。Windows 11 默认绕过有随机黑闪问题的华硕 `ROGAIOSDK.dll`，直接使用系统 HID + WinUSB API；Ubuntu 26.04 提供同一套 UI、监控和背景管理，并附一个需要实机验证的原生 Linux HID + USB bulk LCD 后端。
 
 ## 当前支持状态
@@ -7,8 +9,8 @@
 | 功能 | Windows 11 | Ubuntu 26.04 |
 |---|---|---|
 | 本地 Web UI / 自定义背景 | 支持 | 支持；同一份默认背景已内置 |
-| CPU 占用、频率、内存 | `psutil` | `psutil` |
-| NVIDIA 温度、频率、占用、显存 | NVIDIA 驱动的 `nvidia-smi` | NVIDIA 驱动的 `nvidia-smi` |
+| CPU 占用、频率、功耗、内存 | `psutil` + PDH + LHM/AIDA64 | `psutil` + powercap/hwmon |
+| NVIDIA 温度、频率、占用、功耗、显存 | NVIDIA 驱动的 `nvidia-smi` | NVIDIA 驱动的 `nvidia-smi` |
 | CPU 温度、电压 | 内置 LibreHardwareMonitor 0.9.6；本机 9800X3D 使用 AIDA64 只读 Registry 备用源 | `lm-sensors`/hwmon，经 `psutil` |
 | Ryujin 水温、泵速、内置风扇 | 暂不从 SDK读取 | Linux 6.9+ `asus_rog_ryujin` hwmon |
 | LCD 写入 | Microsoft HID + WinUSB 直连；SDK 仅为可选回退 | 实验性用户态 HID + libusb 后端；命令时序已与 Windows 对齐 |
@@ -49,6 +51,8 @@ ryujin-lcd
 ```powershell
 RyujinLCD.exe --auto-start --no-browser
 ```
+
+发布版 EXE 使用 Windows GUI 子系统运行，不创建命令提示符窗口；后台日志保存在 `%LOCALAPPDATA%\ryujin-lcd\ryujin-lcd.log`。服务生命周期由计划任务和后台进程管理，不再依赖一个可被误关的控制台窗口。
 
 自动启动仍执行冲突检查；如果 Armoury Crate 更新重新安装了 Ryujin 模块，程序会保留 Web 状态页但不会强行抢占 LCD。
 
@@ -113,17 +117,26 @@ sudo .venv/bin/ryujin-lcd --experimental-linux-usb --no-browser
 ## 冲突排除设计
 
 - 程序用系统级文件锁防止自身多开。
-- Windows 检测 AIDA64、Armoury Crate device framework 与相关辅助进程；发现后先弹出进程清单，只有用户确认才停止服务/进程并继续写屏。若 AIDA64 配置中 `HWMonEnableRALCD=0`，它只作为传感器源运行，不视为 LCD 冲突。
-- 若 `ROG RYUJIN II` 设备模块和 `ASUS AIOFan HAL` 已卸载，普通 Armoury Crate/`asus_framework` 进程会被允许共存；模块被 Armoury 更新中心重新安装后会自动恢复冲突拦截。
+- Windows 允许普通 Armoury Crate、`asus_framework` 和 AIOFan HAL 与直连后端共存；是否冲突以 HID+WinUSB 接口的实际打开/写入结果为准，不再根据进程名或 DLL 是否安装误停 LCD。若 AIDA64 配置中 `HWMonEnableRALCD=0`，它只作为传感器源运行，也不视为冲突。
+- USB 重置、睡眠恢复或短暂占用导致写入失败时，LCD 引擎每 3 秒自动重连，不会一次失败后永久停止。
 - Linux 检测 `liquidctl`、CoolerControl、OpenRGB，并显示 `fuser` 打开的 HID/USB句柄。
 - `check-conflicts` 默认只读；只有显式 `-Fix`/`--fix` 才停止已知用户态控制端。
 - Linux 脚本不会卸载/卸载绑定 `asus_rog_ryujin` 内核 hwmon 驱动，避免破坏水温与泵/风扇监控。
 
 ## 传感器来源说明
 
+传感器使用模块化 provider pipeline。Windows 默认走无控制台的 `system/PDH` → `AIDA64 Registry` → `nvidia-smi`；LibreHardwareMonitor helper/WMI 仅在关键字段缺失时回退，避免周期性创建命令提示符。后续 provider 只覆盖自己能读到的非空字段，单个可选源失败不会停止 LCD 刷新。
+
+Web 控制台还可分别调整 CPU/GPU 的显示模块顺序，或隐藏/恢复温度、负载、频率、电压和功耗项目；配置会写入用户目录并在 Windows/Linux 共用同一套渲染逻辑。
+
+LCD 右上角显示主机系统时间，采用 24 小时制 `HH:MM`，并使用与硬件标题一致的内置 ROG 字体。
+
 - `psutil`：CPU 占用、RAM 占用及 Linux CPU 频率；Linux 上也从标准 hwmon 暴露 CPU 温度。
 - Windows CPU 频率：Windows PDH 的 `Processor Information(_Total)\\% Processor Performance` 乘以 `psutil` 返回的名义频率。这样 9800X3D 的 4.7 GHz 基准频率在 112% boost 时显示约 5.3 GHz，而不是固定显示 4.7 GHz。
 - NVIDIA `nvidia-smi`：GPU 名称、核心温度、利用率、图形频率、显存已用/总量；支持 Windows 和 Linux。
+- Windows CPU 功耗：优先使用 LibreHardwareMonitor `Power` 传感器，本机 9800X3D 以 AIDA64 Registry `PCPUPKG` 作为可用备用源。
+- GPU 功耗：Windows/Linux 均优先读取 `nvidia-smi power.draw`；Windows helper 与 AIDA64 `PGPU1` 也可提供备用值。
+- Linux CPU 功耗：优先通过 `/sys/class/powercap/*/energy_uj` 的能量差分计算，其次读取 hwmon `power*_input`。
 - Linux `/sys/class/hwmon/*/name == asus_rog_ryujin`：冷却液温度、泵 RPM、内置风扇 RPM。
 - Windows 内置官方 LibreHardwareMonitor 0.9.6（MPL-2.0）helper，读取 CPU/GPU 温度、电压和频率。本机 9800X3D 的 AMD SMU 温度通道返回空值，因此额外使用已安装 AIDA64 的 Registry sensor export 读取 `CPU Package` 与 `CPU Core` 电压；AIDA64 的 `HWMonEnableRALCD` 必须保持为 `0`，因此它不会调用 ROG AIO LCD。CPU 占用/频率仍来自 `psutil`，GPU 占用/显存来自 `nvidia-smi`。
 - AMD GPU 可在后续增加 AMD ADLX（Windows）和 ROCm SMI/sysfs（Linux）provider；当前 NVIDIA 路径已经完成。

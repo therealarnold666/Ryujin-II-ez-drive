@@ -33,16 +33,19 @@ pre{white-space:pre-wrap;color:#b7c6d8;font:12px/1.5 ui-monospace,monospace;max-
 <div class="metric"><div class="label">CPU 功耗</div><div class="value" id="cp">--</div></div>
 <div class="metric"><div class="label">GPU 温度</div><div class="value" id="gt">--</div></div><div class="metric"><div class="label">GPU 占用</div><div class="value" id="gu">--</div></div>
 <div class="metric"><div class="label">GPU 频率</div><div class="value" id="gf">--</div></div><div class="metric"><div class="label">GPU 电压</div><div class="value" id="gv">--</div></div>
-</div><h3>LCD 统计模块</h3><div id="modules">读取中…</div><h3>独占检查</h3><pre id="diag">读取中…</pre></section></div></main>
+<div class="metric"><div class="label">GPU 功耗</div><div class="value" id="gp">--</div></div>
+</div><h3>所有显卡</h3><pre id="allGpus">读取中…</pre><h3>LCD 统计模块</h3><div id="modules">读取中…</div><h3>独占检查</h3><pre id="diag">读取中…</pre></section></div></main>
 <script>
 const $=id=>document.getElementById(id),whole=(v,u)=>v==null?'--':Math.round(v)+u,dec=(v,u,n)=>v==null?'--':Number(v).toFixed(n)+u,ghz=v=>v==null?'--':dec(v/1000,' GHz',1);
-async function status(){let s=await(await fetch('/api/status')).json(),m=s.metrics||{};$('ct').textContent=whole(m.cpu_temp_c,'°');$('cu').textContent=whole(m.cpu_usage,'%');$('cf').textContent=ghz(m.cpu_freq_mhz);$('cv').textContent=dec(m.cpu_voltage_v,' V',2);$('cp').textContent=whole(m.cpu_power_w,' W');$('gt').textContent=whole(m.gpu_temp_c,'°');$('gu').textContent=whole(m.gpu_usage,'%');$('gf').textContent=ghz(m.gpu_freq_mhz);$('gv').textContent=dec(m.gpu_voltage_v,' V',2);$('runState').innerHTML=s.running?'<span class="ok">● 正在驱动</span>':'<span class="warn">● 已停止</span>';$('fps').textContent=s.animation_active?('动画 '+(s.actual_fps||0)+' / '+s.target_fps+' FPS'):'';$('message').textContent=s.error||''}
+async function status(){let s=await(await fetch('/api/status')).json(),m=s.metrics||{};$('ct').textContent=whole(m.cpu_temp_c,'°');$('cu').textContent=whole(m.cpu_usage,'%');$('cf').textContent=ghz(m.cpu_freq_mhz);$('cv').textContent=dec(m.cpu_voltage_v,' V',2);$('cp').textContent=whole(m.cpu_power_w,' W');$('gt').textContent=whole(m.gpu_temp_c,'°');$('gu').textContent=whole(m.gpu_usage,'%');$('gf').textContent=ghz(m.gpu_freq_mhz);$('gv').textContent=dec(m.gpu_voltage_v,' V',2);$('gp').textContent=whole(m.gpu_power_w,' W');$('runState').innerHTML=s.running?'<span class="ok">● 正在驱动</span>':'<span class="warn">● 已停止</span>';$('fps').textContent=s.animation_active?('动画 '+(s.actual_fps||0)+' / '+s.target_fps+' FPS'):'';$('message').textContent=s.error||''}
 async function modules(){let d=await(await fetch('/api/modules')).json(),names=d.catalog;$('modules').innerHTML=['cpu','gpu'].map(kind=>'<div><b>'+kind.toUpperCase()+'</b>'+d[kind+'_modules'].map((id,i)=>'<div class="module"><label>'+names[id]+'</label><button onclick="moveModule(\''+kind+'\','+i+',-1)">↑</button><button onclick="moveModule(\''+kind+'\','+i+',1)">↓</button><button class="secondary" onclick="removeModule(\''+kind+'\',\''+id+'\')">隐藏</button></div>').join('')+'<select onchange="addModule(\''+kind+'\',this.value);this.value=\'\'"><option value="">添加模块…</option>'+Object.entries(names).filter(([id])=>!d[kind+'_modules'].includes(id)).map(([id,name])=>'<option value="'+id+'">'+name+'</option>').join('')+'</select></div>').join('')}
 async function saveModules(kind,items){await fetch('/api/modules',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({[kind+'_modules']:items})});modules();refreshPreview()}
 async function moveModule(kind,index,delta){let d=await(await fetch('/api/modules')).json(),items=d[kind+'_modules'],to=index+delta;if(to<0||to>=items.length)return;[items[index],items[to]]=[items[to],items[index]];saveModules(kind,items)}
 async function removeModule(kind,id){let d=await(await fetch('/api/modules')).json();saveModules(kind,d[kind+'_modules'].filter(x=>x!==id))}
 async function addModule(kind,id){if(!id)return;let d=await(await fetch('/api/modules')).json();saveModules(kind,[...d[kind+'_modules'],id])}
 function refreshPreview(){$('preview').src='/api/preview?t='+Date.now()}
+async function gpuStatus(){let s=await(await fetch('/api/status')).json();$('allGpus').textContent=(s.metrics.gpus||[]).map(g=>'GPU '+(g.index+1)+' · '+g.gpu_name+'\n'+whole(g.gpu_temp_c,' °C')+' | '+whole(g.gpu_usage,' %')+' | '+ghz(g.gpu_freq_mhz)+' | '+whole(g.gpu_power_w,' W')+'\nVRAM '+dec(g.gpu_memory_used_mb/1024,'',1)+' / '+dec(g.gpu_memory_total_mb/1024,' GB',1)+'\n'+g.uuid).join('\n\n')||'没有可用的独立显卡数据'}
+gpuStatus();setInterval(gpuStatus,2200);
 async function diag(){let d=await(await fetch('/api/diagnostic')).json();$('diag').textContent=JSON.stringify(d,null,2)}
 $('file').onchange=async e=>{let f=e.target.files[0];if(!f)return;let b=new FormData();b.append('file',f);let r=await fetch('/api/background',{method:'POST',body:b});$('message').textContent=(await r.json()).message;status()}
 async function startLCD(stopConflicts=false){let r=await fetch('/api/start?stop_conflicts='+stopConflicts,{method:'POST'}),j=await r.json();if(r.status===409&&j.detail&&j.detail.conflicts&&!stopConflicts){let lines=j.detail.conflicts.map(x=>x.process+' (PID '+x.pid+')').join('\n');if(confirm('检测到以下程序可能抢占 LCD：\n\n'+lines+'\n\n是否停止这些进程并继续启动？'))return startLCD(true)}$('message').textContent=j.message||(typeof j.detail==='string'?j.detail:(j.detail&&j.detail.message))||'';status();diag()}
@@ -76,8 +79,7 @@ def create_app(settings: Settings, mock: bool = False, force: bool = False,
     def update_modules(payload: dict) -> dict:
         for key in ("cpu_modules", "gpu_modules"):
             if key in payload:
-                settings_value = normalize_modules(payload[key])
-                setattr(settings, key, settings_value)
+                setattr(settings, key, normalize_modules(payload[key]))
         settings.save()
         engine.refresh_preview()
         return modules()

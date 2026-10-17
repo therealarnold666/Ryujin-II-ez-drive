@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import webbrowser
 
 import uvicorn
 
-from .config import Settings
+from .config import Settings, app_dir
 from .conflicts import InstanceLock, diagnostic
 from .web import create_app
 
@@ -25,6 +26,17 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # PyInstaller's Windows GUI bootloader intentionally provides no console
+    # streams. Uvicorn and optional sensor libraries still probe/write them,
+    # so attach both to a per-user log instead of opening a command prompt.
+    if sys.stdout is None or sys.stderr is None:
+        log_dir = app_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stream = (log_dir / "ryujin-lcd.log").open("a", encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = stream
+        if sys.stderr is None:
+            sys.stderr = stream
     args = parser().parse_args()
     if args.diagnostic:
         print(json.dumps(diagnostic(), ensure_ascii=False, indent=2))

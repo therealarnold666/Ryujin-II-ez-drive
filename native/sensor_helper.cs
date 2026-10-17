@@ -30,8 +30,8 @@ internal static class SensorHelper
     {
         string cpuName = null;
         string gpuName = null;
-        float? cpuTemp = null, cpuVoltage = null, cpuClock = null;
-        float? gpuTemp = null, gpuVoltage = null, gpuClock = null;
+        float? cpuTemp = null, cpuVoltage = null, cpuClock = null, cpuPower = null;
+        float? gpuTemp = null, gpuVoltage = null, gpuClock = null, gpuPower = null;
         var computer = new Computer
         {
             IsCpuEnabled = true,
@@ -74,6 +74,12 @@ internal static class SensorHelper
                             .Select(s => Valid(s, 0, 10000)).Where(v => v.HasValue).Select(v => v.Value).ToList();
                         if (coreClocks.Count > 0) cpuClock = coreClocks.Average();
                     }
+
+                    ISensor power = hardware.Sensors
+                        .Where(s => s.SensorType == SensorType.Power)
+                        .OrderByDescending(s => s.Name.IndexOf("Package", StringComparison.OrdinalIgnoreCase) >= 0)
+                        .FirstOrDefault();
+                    if (power != null) cpuPower = Valid(power, 0, 1000);
                 }
                 else if (hardware.HardwareType == HardwareType.GpuNvidia)
                 {
@@ -84,6 +90,12 @@ internal static class SensorHelper
                     if (sensor != null) gpuVoltage = Valid(sensor, 0, 2);
                     sensor = hardware.Sensors.FirstOrDefault(s => s.SensorType == SensorType.Clock && s.Name.Equals("GPU Core", StringComparison.OrdinalIgnoreCase));
                     if (sensor != null) gpuClock = Valid(sensor, 0, 10000);
+                    sensor = hardware.Sensors
+                        .Where(s => s.SensorType == SensorType.Power)
+                        .OrderByDescending(s => s.Name.IndexOf("GPU", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                s.Name.IndexOf("Total", StringComparison.OrdinalIgnoreCase) >= 0)
+                        .FirstOrDefault();
+                    if (sensor != null) gpuPower = Valid(sensor, 0, 2000);
                 }
 
                 // Ryzen temperature can also be exposed by the board Super I/O.
@@ -113,10 +125,12 @@ internal static class SensorHelper
             "\"cpu_temp_c\":" + JsonNumber(cpuTemp) + "," +
             "\"cpu_voltage_v\":" + JsonNumber(cpuVoltage) + "," +
             "\"cpu_freq_mhz\":" + JsonNumber(cpuClock) + "," +
+            "\"cpu_power_w\":" + JsonNumber(cpuPower) + "," +
             "\"gpu_name\":" + JsonString(gpuName) + "," +
             "\"gpu_temp_c\":" + JsonNumber(gpuTemp) + "," +
             "\"gpu_voltage_v\":" + JsonNumber(gpuVoltage) + "," +
-            "\"gpu_freq_mhz\":" + JsonNumber(gpuClock) + "}";
+            "\"gpu_freq_mhz\":" + JsonNumber(gpuClock) + "," +
+            "\"gpu_power_w\":" + JsonNumber(gpuPower) + "}";
         if (args.Length > 0) File.WriteAllText(args[0], json, new UTF8Encoding(false));
         else Console.WriteLine(json);
         return 0;

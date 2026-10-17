@@ -150,6 +150,7 @@ class WindowsSDKDriver(LCDDriver):
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
         def drain() -> None:
@@ -250,9 +251,8 @@ class LinuxExperimentalDriver(LCDDriver):
         self.hid = hid.device()
         self.hid.open_path(raw_path)
         self.hid.set_nonblocking(False)
-        # On Linux the device may not surface a status reply through hidapi
-        # even though it accepts output reports.  Live mode is idempotent, so
-        # set it directly instead of making display startup depend on a query.
+        # Linux may accept output reports without surfacing replies via hidapi.
+        # Live mode is idempotent, so do not make startup depend on a query.
         self._set_live_mode()
         self.next_status = float("inf")
 
@@ -263,16 +263,12 @@ class LinuxExperimentalDriver(LCDDriver):
     def _hid_read(self, timeout_ms: int) -> bytes:
         if not self.hid:
             raise DriverError("Ryujin HID control interface is not open")
-        # This device can emit a one-byte 00 report immediately before the
-        # response.  Windows' raw handle hides that detail; hidapi exposes it.
-        # Ignore short reports while there is still time for the requested
-        # 64/65-byte response to arrive.
+        # hidapi may expose a one-byte 00 report before the real response and
+        # strips the report ID on Linux, producing 64 instead of 65 bytes.
         deadline = time.monotonic() + timeout_ms / 1000
         while True:
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             response = bytes(self.hid.read(65, timeout_ms=remaining_ms))
-            # Windows returns the report ID plus 64 bytes. hidapi on Linux
-            # strips the report ID for this device and returns 64 bytes.
             if len(response) in (64, 65):
                 return response
             if time.monotonic() >= deadline:
@@ -298,19 +294,14 @@ class LinuxExperimentalDriver(LCDDriver):
         command = bytearray(65)
         command[0:3] = bytes([0xEC, 0x7F, 0x03])
         command[4:6] = bytes([0x84, 0x03])
-        # The prepare reply is optional on this firmware. Waiting for it after
-        # every frame can consume a delayed ACK instead and stalls the next
-        # transfer, while the bulk endpoint has already accepted the frame.
+        # Firmware's prepare reply is optional and may be confused with a
+        # delayed frame ACK by Linux hidapi, so only submit the command.
         self._hid_write(bytes(command))
 
     def _drain_frame_ack(self) -> None:
         if self.frame_ack_pending:
-            # Firmware normally emits EE 20 after a bulk frame, but the
-            # Linux hidapi backend can block indefinitely while waiting for
-            # that optional acknowledgement after resume/boot.  The bulk
-            # transfer is the authoritative delivery result, so do not read
-            # the acknowledgement here: it is neither required by the device
-            # nor safe to put on the periodic rendering path.
+            # The bulk transfer is the authoritative delivery result. Linux
+            # hidapi can block indefinitely on this optional firmware ACK.
             self.frame_ack_pending = False
 
     def _ensure_display_mode(self) -> None:
@@ -335,10 +326,8 @@ class LinuxExperimentalDriver(LCDDriver):
         if len(frame) != expected:
             raise DriverError(f"Invalid Linux frame size: {len(frame)}/{expected}")
         now = time.monotonic()
-        # The initial status query establishes live mode.  On Linux this
-        # device does not reliably distinguish delayed frame ACKs from later
-        # status replies, so continuous bulk streaming is safer than periodic
-        # mode probing (the Windows raw-HID path can retain that extra check).
+        # Delayed ACKs and status replies are not reliably distinguishable on
+        # Linux; continuous bulk streaming is safer than periodic mode probes.
         self._drain_frame_ack()
         self._send_frame(frame)
         self.last_frame = frame
@@ -367,17 +356,16 @@ class LinuxExperimentalDriver(LCDDriver):
                 self.dev = None
                 self.endpoint = None
                 self.interface_number = None
-        # The hidapi libusb backend temporarily detaches the kernel HID
-        # driver. Rebind it after all userspace handles are closed so the
-        # in-kernel rog_ryujin hwmon driver is available again on exit.
+        # hidapi's libusb backend may detach the kernel HID driver. Rebind it
+        # so rog_ryujin hwmon is available again after this process exits.
         if sys.platform == "linux" and self.hid_interface_name:
             interface = Path("/sys/bus/usb/devices") / self.hid_interface_name
             try:
                 if interface.is_dir() and not (interface / "driver").exists():
-                    Path("/sys/bus/usb/drivers/usbhid/bind").write_text(self.hid_interface_name + "\n")
+                    Path("/sys/bus/usb/drivers/usbhid/bind").write_text(
+                        self.hid_interface_name + "\n"
+                    )
             except OSError:
-                # Non-root operation remains valid when udev grants only the
-                # device handles, not sysfs driver administration.
                 pass
         self.hid_interface_name = None
 

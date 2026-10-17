@@ -6,7 +6,6 @@ import time
 from dataclasses import asdict
 
 from .config import Settings
-from .conflicts import process_conflicts
 from .drivers import LCDDriver, create_driver
 from .render import background_is_animated, frame_bytes, render
 from .sensors import Metrics, collect
@@ -24,6 +23,7 @@ class Engine:
         self.frames_sent = 0
         self.actual_fps = 0.0
         self.animation_active = False
+        self.reconnects = 0
         self._thread: threading.Thread | None = None
         self._sensor_thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -51,10 +51,7 @@ class Engine:
             return
         self.error = ""
         driver = create_driver(self.settings, self.mock)
-        # A Linux USB claim can succeed before opening the companion HID
-        # interface fails.  Always release that partial claim so the user can
-        # correct the condition and press “start” again without reconnecting
-        # the cooler or restarting the web service.
+        # Release a partial Linux USB claim if the companion HID open fails.
         try:
             driver.start()
         except Exception:
@@ -82,18 +79,34 @@ class Engine:
 
         def loop() -> None:
             try:
-                next_conflict_check = 0.0
                 fps_started = time.monotonic()
                 fps_frames = 0
                 while not self._stop.is_set():
                     started = time.monotonic()
-                    if not self.mock and started >= next_conflict_check:
-                        conflicts = process_conflicts()
-                        if conflicts:
-                            names = ", ".join(f"{x.process} (PID {x.pid})" for x in conflicts)
-                            raise RuntimeError(f"运行中检测到新的 LCD 控制冲突，已停止写屏：{names}")
-                        next_conflict_check = started + 2.0
-                    self._tick(send=True, update_metrics=False)
+                    try:
+                        self._tick(send=True, update_metrics=False)
+                    except Exception as exc:
+                        # A USB reset, sleep/resume or a short Armoury probe
+                        # must not permanently stop the dashboard. Release the
+                        # failed helper and retry the real device open until it
+                        # returns or the user explicitly stops the engine.
+                        self.error = f"LCD 暂时断开，正在自动重连：{exc}"
+                        if self.driver:
+                            self.driver.close()
+                        self.driver = None
+                        while not self._stop.wait(3.0):
+                            try:
+                                replacement = create_driver(self.settings, self.mock)
+                                replacement.start()
+                                self.driver = replacement
+                                self.reconnects += 1
+                                self.error = ""
+                                break
+                            except Exception as reconnect_exc:
+                                self.error = f"LCD 自动重连中：{reconnect_exc}"
+                        if self._stop.is_set():
+                            break
+                        continue
                     animated = background_is_animated(self.settings.background)
                     self.animation_active = animated
                     self.frames_sent += 1
@@ -144,5 +157,6 @@ class Engine:
             "transport_fps": min(30.0, max(1.0, self.settings.animation_fps) + 4.0) if self.animation_active else None,
             "actual_fps": round(self.actual_fps, 1) if self.animation_active else None,
             "frames_sent": self.frames_sent,
+            "reconnects": self.reconnects,
             "metrics": asdict(self.metrics),
         }
