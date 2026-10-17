@@ -119,6 +119,8 @@ def test_windows_armoury_processes_are_not_name_only_conflicts(monkeypatch):
 def test_short_hardware_names():
     assert short_cpu_name("AMD Ryzen 7 9800X3D") == "9800X3D"
     assert short_gpu_name("NVIDIA GeForce RTX 5090") == "RTX 5090"
+    assert short_gpu_name("NVIDIA GeForce RTX 4080 SUPER") == "RTX 4080 SUPER"
+    assert short_gpu_name("NVIDIA GeForce RTX 4070 Ti SUPER") == "RTX 4070 TI SUPER"
 
 
 def test_linux_protocol_matches_verified_commands():

@@ -357,7 +357,7 @@ def short_gpu_name(name: str | None) -> str:
     if not name:
         return "GPU"
     import re
-    match = re.search(r"\bRTX\s*\d{4}\b", name, re.IGNORECASE)
+    match = re.search(r"\bRTX\s*\d{4}(?:\s+(?:TI(?:\s+SUPER)?|SUPER))?\b", name, re.IGNORECASE)
     return " ".join(match.group(0).upper().split()) if match else name[:18]
 
 
